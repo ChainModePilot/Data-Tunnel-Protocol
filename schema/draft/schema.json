@@ -1,0 +1,482 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ifay.dev/schema/dtp/2025-10-25/schema.json",
+  "title": "Data Tunnel Protocol (DTP) Schema",
+  "description": "JSON Schema definitions for the Data Tunnel Protocol (DTP) — version 2025-10-25.",
+  "definitions": {
+    "FragmentID": {
+      "type": "string",
+      "description": "Fragment unique identifier (UUID v4).",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "AgreementID": {
+      "type": "string",
+      "description": "Agreement unique identifier (UUID v4).",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SessionID": {
+      "type": "string",
+      "description": "Session unique identifier (UUID v4).",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "ConnectionID": {
+      "type": "string",
+      "description": "Connection identifier."
+    },
+    "OriginTimestamp": {
+      "type": "number",
+      "description": "UTC millisecond timestamp."
+    },
+    "SequenceNumber": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonically increasing integer."
+    },
+    "ProtocolVersion": {
+      "type": "object",
+      "description": "Protocol version number.",
+      "properties": {
+        "major": { "type": "integer", "minimum": 0 },
+        "minor": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["major", "minor"],
+      "additionalProperties": false
+    },
+    "FrameType": {
+      "type": "string",
+      "enum": ["data", "request", "response", "control"],
+      "description": "Frame type discriminator."
+    },
+    "EncryptionMetadata": {
+      "type": "object",
+      "description": "Encryption metadata transmitted in cleartext within the frame header.",
+      "properties": {
+        "algorithm": { "type": "string", "description": "Encryption algorithm identifier (e.g. AES-256-GCM)." },
+        "keyVersion": { "type": "integer", "minimum": 0, "description": "Key version number." }
+      },
+      "required": ["algorithm", "keyVersion"],
+      "additionalProperties": false
+    },
+    "DAGRelationType": {
+      "type": "string",
+      "enum": ["derived_from", "annotates", "supersedes"],
+      "description": "DAG relation type between fragments."
+    },
+    "DAGEdge": {
+      "type": "object",
+      "description": "DAG dependency edge.",
+      "properties": {
+        "targetFragmentId": { "$ref": "#/definitions/FragmentID" },
+        "relationType": { "$ref": "#/definitions/DAGRelationType" }
+      },
+      "required": ["targetFragmentId", "relationType"],
+      "additionalProperties": false
+    },
+    "FrameHeader": {
+      "type": "object",
+      "description": "Frame header.",
+      "properties": {
+        "protocolVersion": { "$ref": "#/definitions/ProtocolVersion" },
+        "frameType": { "$ref": "#/definitions/FrameType" },
+        "fragmentId": { "$ref": "#/definitions/FragmentID" },
+        "agreementId": {
+          "oneOf": [
+            { "$ref": "#/definitions/AgreementID" },
+            { "type": "null" }
+          ],
+          "description": "Agreement ID (nullable; null means inherited from previous frame)."
+        },
+        "originTimestamp": { "$ref": "#/definitions/OriginTimestamp" },
+        "dagDependencies": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/DAGEdge" },
+          "description": "DAG dependency list."
+        },
+        "encryptionMetadata": { "$ref": "#/definitions/EncryptionMetadata" },
+        "sequenceNumber": { "$ref": "#/definitions/SequenceNumber" }
+      },
+      "required": [
+        "protocolVersion", "frameType", "fragmentId", "agreementId",
+        "originTimestamp", "dagDependencies", "encryptionMetadata", "sequenceNumber"
+      ],
+      "additionalProperties": false
+    },
+    "LogicalFrame": {
+      "type": "object",
+      "description": "Logical frame — the primary wire format unit of DTP.",
+      "properties": {
+        "header": { "$ref": "#/definitions/FrameHeader" },
+        "payload": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Encrypted payload (binary data, base64-encoded in JSON representation)."
+        }
+      },
+      "required": ["header", "payload"],
+      "additionalProperties": false
+    },
+    "HardwareSource": {
+      "type": "object",
+      "description": "Hardware sensor data source.",
+      "properties": {
+        "kind": { "type": "string", "const": "hardware" },
+        "sensorType": { "type": "string", "description": "Sensor type." },
+        "precision": { "type": "string", "description": "Sensor precision." },
+        "samplingRate": { "type": "number", "description": "Sampling rate in Hz." }
+      },
+      "required": ["kind", "sensorType", "precision", "samplingRate"],
+      "additionalProperties": false
+    },
+    "SoftwareSource": {
+      "type": "object",
+      "description": "Software data source.",
+      "properties": {
+        "kind": { "type": "string", "const": "software" },
+        "appIdentifier": { "type": "string", "description": "Source application identifier." },
+        "sharingMethod": { "type": "string", "description": "Sharing method description." }
+      },
+      "required": ["kind", "appIdentifier", "sharingMethod"],
+      "additionalProperties": false
+    },
+    "DataSource": {
+      "description": "Data source — discriminated union on the 'kind' field.",
+      "oneOf": [
+        { "$ref": "#/definitions/HardwareSource" },
+        { "$ref": "#/definitions/SoftwareSource" }
+      ]
+    },
+    "ContextMetadata": {
+      "type": "object",
+      "description": "Structured context metadata attached to each fragment.",
+      "properties": {
+        "dataType": { "type": "string", "description": "Data type identifier." },
+        "source": { "$ref": "#/definitions/DataSource" },
+        "customFields": {
+          "type": "object",
+          "description": "Extensible key-value pairs for custom metadata.",
+          "additionalProperties": true
+        }
+      },
+      "required": ["dataType", "source", "customFields"],
+      "additionalProperties": false
+    },
+    "Fragment": {
+      "type": "object",
+      "description": "Data fragment — the fundamental data unit in DTP.",
+      "properties": {
+        "fragmentId": { "$ref": "#/definitions/FragmentID" },
+        "agreementId": { "$ref": "#/definitions/AgreementID" },
+        "originTimestamp": { "$ref": "#/definitions/OriginTimestamp" },
+        "contextMetadata": { "$ref": "#/definitions/ContextMetadata" },
+        "dagDependencies": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/DAGEdge" }
+        },
+        "data": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Actual data content (binary, base64-encoded in JSON)."
+        }
+      },
+      "required": ["fragmentId", "agreementId", "originTimestamp", "contextMetadata", "dagDependencies", "data"],
+      "additionalProperties": false
+    },
+    "TransferMode": {
+      "type": "string",
+      "enum": ["one_time", "periodic", "streaming"],
+      "description": "Transfer mode."
+    },
+    "Priority": {
+      "type": "string",
+      "enum": ["low", "normal", "high", "critical"],
+      "description": "Priority level."
+    },
+    "AgreementStatus": {
+      "type": "string",
+      "enum": ["negotiating", "active", "suspended", "terminated"],
+      "description": "Agreement status."
+    },
+    "TransferDirection": {
+      "type": "string",
+      "enum": ["collection", "injection"],
+      "description": "Data transfer direction."
+    },
+    "AgreementParams": {
+      "type": "object",
+      "description": "Agreement parameters.",
+      "properties": {
+        "dataType": { "type": "string" },
+        "dataRange": { "type": "string" },
+        "transferMode": { "$ref": "#/definitions/TransferMode" },
+        "frequency": {
+          "oneOf": [
+            { "type": "number" },
+            { "type": "null" }
+          ],
+          "description": "Transfer frequency in Hz (null for one-time mode)."
+        },
+        "validityPeriod": { "type": "number", "description": "Validity period in milliseconds." },
+        "priority": { "$ref": "#/definitions/Priority" }
+      },
+      "required": ["dataType", "dataRange", "transferMode", "frequency", "validityPeriod", "priority"],
+      "additionalProperties": false
+    },
+    "Agreement": {
+      "type": "object",
+      "description": "Agreement — a negotiated data transfer contract between master and slave.",
+      "properties": {
+        "agreementId": { "$ref": "#/definitions/AgreementID" },
+        "sessionId": { "$ref": "#/definitions/SessionID" },
+        "direction": { "$ref": "#/definitions/TransferDirection" },
+        "initiator": { "type": "string", "enum": ["master", "slave"] },
+        "params": { "$ref": "#/definitions/AgreementParams" },
+        "status": { "$ref": "#/definitions/AgreementStatus" },
+        "createdAt": { "type": "number", "description": "Creation time (UTC ms)." }
+      },
+      "required": ["agreementId", "sessionId", "direction", "initiator", "params", "status", "createdAt"],
+      "additionalProperties": false
+    },
+    "NegotiationResult": {
+      "type": "string",
+      "enum": ["accepted", "rejected", "counter_proposal"],
+      "description": "Negotiation result."
+    },
+    "RequestFrame": {
+      "type": "object",
+      "description": "Request frame — used to initiate or adjust agreements.",
+      "properties": {
+        "frameType": { "type": "string", "const": "request" },
+        "requestId": { "type": "string" },
+        "requestorRole": { "type": "string", "enum": ["master", "slave"] },
+        "requestType": { "type": "string", "enum": ["collection", "injection", "adjustment", "termination"] },
+        "targetAgreementId": { "$ref": "#/definitions/AgreementID" },
+        "proposedParams": { "$ref": "#/definitions/AgreementParams" }
+      },
+      "required": ["frameType", "requestId", "requestorRole", "requestType", "proposedParams"],
+      "additionalProperties": false
+    },
+    "ResponseFrame": {
+      "type": "object",
+      "description": "Response frame — reply to a request frame.",
+      "properties": {
+        "frameType": { "type": "string", "const": "response" },
+        "requestId": { "type": "string" },
+        "result": { "$ref": "#/definitions/NegotiationResult" },
+        "agreedParams": { "$ref": "#/definitions/AgreementParams" },
+        "agreementId": { "$ref": "#/definitions/AgreementID" },
+        "rejectionReason": { "type": "string" }
+      },
+      "required": ["frameType", "requestId", "result"],
+      "additionalProperties": false
+    },
+    "SessionState": {
+      "type": "string",
+      "enum": ["idle", "waiting_for_cap", "established", "negotiating", "transmitting", "suspended", "resuming"],
+      "description": "Session state."
+    },
+    "DirectionalTransferState": {
+      "type": "object",
+      "description": "Directional transfer state (one per direction).",
+      "properties": {
+        "currentSequenceNumber": { "$ref": "#/definitions/SequenceNumber" },
+        "highestAcknowledgedSequenceNumber": { "$ref": "#/definitions/SequenceNumber" },
+        "unacknowledgedFragmentCache": {
+          "type": "object",
+          "description": "Map of sequence number to cached fragment (keyed by string representation of SequenceNumber).",
+          "additionalProperties": { "$ref": "#/definitions/Fragment" }
+        }
+      },
+      "required": ["currentSequenceNumber", "highestAcknowledgedSequenceNumber", "unacknowledgedFragmentCache"],
+      "additionalProperties": false
+    },
+    "Session": {
+      "type": "object",
+      "description": "DTP session.",
+      "properties": {
+        "sessionId": { "$ref": "#/definitions/SessionID" },
+        "masterIdentity": { "type": "string" },
+        "slaveIdentity": { "type": "string" },
+        "state": { "$ref": "#/definitions/SessionState" },
+        "activeAgreements": {
+          "type": "object",
+          "description": "Map of AgreementID to Agreement.",
+          "additionalProperties": { "$ref": "#/definitions/Agreement" }
+        },
+        "collectionState": { "$ref": "#/definitions/DirectionalTransferState" },
+        "injectionState": { "$ref": "#/definitions/DirectionalTransferState" },
+        "createdAt": { "type": "number" },
+        "lastActivityAt": { "type": "number" },
+        "timeoutThreshold": { "type": "number", "description": "Timeout threshold in milliseconds." }
+      },
+      "required": [
+        "sessionId", "masterIdentity", "slaveIdentity", "state", "activeAgreements",
+        "collectionState", "injectionState", "createdAt", "lastActivityAt", "timeoutThreshold"
+      ],
+      "additionalProperties": false
+    },
+    "ConnectionState": {
+      "type": "string",
+      "enum": ["connected", "disconnected", "error"],
+      "description": "Connection state."
+    },
+    "TransportEndpoint": {
+      "type": "object",
+      "description": "Transport endpoint descriptor.",
+      "properties": {
+        "protocol": { "type": "string" },
+        "address": { "type": "string" },
+        "port": { "type": "integer" }
+      },
+      "required": ["protocol", "address"],
+      "additionalProperties": false
+    },
+    "Connection": {
+      "type": "object",
+      "description": "Connection object.",
+      "properties": {
+        "connectionId": { "$ref": "#/definitions/ConnectionID" },
+        "state": { "$ref": "#/definitions/ConnectionState" }
+      },
+      "required": ["connectionId", "state"],
+      "additionalProperties": false
+    },
+    "ControlFrame": {
+      "type": "object",
+      "description": "Control frame — used for agreement termination, error notifications, etc.",
+      "properties": {
+        "frameType": { "type": "string", "const": "control" },
+        "controlType": { "type": "string" },
+        "agreementId": { "$ref": "#/definitions/AgreementID" },
+        "details": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["frameType", "controlType"],
+      "additionalProperties": false
+    },
+    "DTPErrorCode": {
+      "type": "integer",
+      "description": "DTP error code enumeration.",
+      "enum": [
+        1001, 1002,
+        2001, 2002,
+        3001, 3002, 3003,
+        4001, 4002,
+        5001, 5002, 5003,
+        6001, 6002,
+        7001,
+        8001, 8002
+      ]
+    },
+    "DTPError": {
+      "type": "object",
+      "description": "DTP error.",
+      "properties": {
+        "code": { "$ref": "#/definitions/DTPErrorCode" },
+        "message": { "type": "string" },
+        "details": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["code", "message"],
+      "additionalProperties": false
+    },
+    "ErrorNotificationFrame": {
+      "type": "object",
+      "description": "Error notification frame.",
+      "properties": {
+        "frameType": { "type": "string", "const": "control" },
+        "controlType": { "type": "string", "const": "error_notification" },
+        "errorCode": { "$ref": "#/definitions/DTPErrorCode" },
+        "errorMessage": { "type": "string" },
+        "relatedFrameId": { "$ref": "#/definitions/FragmentID" },
+        "relatedAgreementId": { "$ref": "#/definitions/AgreementID" },
+        "details": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["frameType", "controlType", "errorCode", "errorMessage"],
+      "additionalProperties": false
+    },
+    "CAPContext": {
+      "type": "object",
+      "description": "CAP context provided by the CAP protocol.",
+      "properties": {
+        "identity": { "type": "string" },
+        "sessionKey": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Session key (binary, base64-encoded in JSON)."
+        },
+        "verified": { "type": "boolean" }
+      },
+      "required": ["identity", "sessionKey", "verified"],
+      "additionalProperties": false
+    },
+    "AgreementRequest": {
+      "type": "object",
+      "description": "Agreement request used to initiate negotiation.",
+      "properties": {
+        "direction": { "$ref": "#/definitions/TransferDirection" },
+        "proposedParams": { "$ref": "#/definitions/AgreementParams" }
+      },
+      "required": ["direction", "proposedParams"],
+      "additionalProperties": false
+    },
+    "DAGValidationResult": {
+      "description": "DAG validation result — discriminated union on the 'status' field.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "const": "accepted" }
+          },
+          "required": ["status"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "const": "pending" },
+            "unresolvedDeps": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/FragmentID" }
+            }
+          },
+          "required": ["status", "unresolvedDeps"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "const": "rejected" },
+            "reason": { "type": "string", "const": "cycle_detected" }
+          },
+          "required": ["status", "reason"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DependencyResolutionResult": {
+      "type": "object",
+      "description": "Dependency resolution result.",
+      "properties": {
+        "resolved": { "type": "boolean" },
+        "resolvedDeps": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FragmentID" }
+        },
+        "unresolvedDeps": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FragmentID" }
+        }
+      },
+      "required": ["resolved", "resolvedDeps", "unresolvedDeps"],
+      "additionalProperties": false
+    },
+    "ResumeReport": {
+      "type": "object",
+      "description": "Resume report.",
+      "properties": {
+        "collectionHighest": { "$ref": "#/definitions/SequenceNumber" },
+        "injectionHighest": { "$ref": "#/definitions/SequenceNumber" }
+      },
+      "required": ["collectionHighest", "injectionHighest"],
+      "additionalProperties": false
+    }
+  }
+}

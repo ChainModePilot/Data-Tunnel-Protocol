@@ -1,0 +1,11 @@
+# Ignore everything by default
+*
+
+# Allow docs and schema directories
+!docs/
+!docs/**
+!schema/
+!schema/**
+
+# Keep .gitignore itself tracked
+!.gitignore

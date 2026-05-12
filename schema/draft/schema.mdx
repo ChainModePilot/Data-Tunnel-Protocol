@@ -1,0 +1,471 @@
+# Data Tunnel Protocol (DTP) Schema — Version 2025-10-25
+
+## Overview
+
+The Data Tunnel Protocol (DTP) is an application-layer protocol within the iFay ecosystem responsible for bidirectional data transfer between terminals and Fay instances. DTP implements a **negotiation-based data tunnel** that supports two core data flows:
+
+- **Data Collection** (Terminal → Fay): Persists terminal-produced data into the iFay Personal Data Heap. For example, a smartwatch continuously sends heart rate readings to the user's iFay, which stores them as part of the host's health timeline.
+- **Data Injection** (Fay → Terminal): Delivers filtered, minimized datasets from iFay to terminal applications. For example, a shopping app asks iFay for the user's dietary preferences; iFay responds with only "prefers cold beverages" without revealing the underlying health data or GPS history that led to that conclusion.
+
+DTP is transport-agnostic — it operates over BLE, WebSocket, TCP, RTSP, or any transport exposed through the `Transport_Adapter` abstraction. A smartwatch might use BLE, a home security camera might use RTSP, and a cloud-based SaaS app might use WebSocket — DTP treats them all the same. DTP works in tandem with the Control Authorization Protocol (CAP), which handles identity verification and key exchange before DTP takes over the data flow.
+
+### Design Principles
+
+| Principle | Description |
+|---|---|
+| Transport Independence | DTP core logic is decoupled from concrete transport protocols via `Transport_Adapter`. Whether the terminal connects via Bluetooth (a fitness band), Wi-Fi (a smart speaker), or cellular (a vehicle OBD-II dongle), DTP behaves identically. |
+| Negotiation First | All data transfers require a negotiated Agreement — no "bare" transfers. Before a smart thermostat starts sending temperature logs, iFay and the thermostat must first agree on what data, how often, and for how long. |
+| Data Sovereignty | The Master (Fay) holds final decision authority over data flows. When a food delivery app requests the user's location history, iFay decides whether to share it, how much to share, and in what granularity — the app cannot take it by force. |
+| End-to-End Encryption | Payloads are encrypted; the FayGer runtime cannot access plaintext. Even if iFay runs on a shared cloud FayGer instance, the cloud operator cannot read the user's personal data flowing through DTP. |
+| Context Preservation | Every Fragment carries structured context metadata to preserve semantic meaning. A photo taken at a restaurant carries not just pixel data but also GPS coordinates, ambient temperature, and the app that triggered the capture — so iFay can later understand *why* the photo was taken. |
+| Resumability | Sequence-number-based resume mechanism supports seamless recovery after disconnection. If a user's phone loses signal in a subway tunnel while uploading a batch of fitness data, DTP picks up exactly where it left off when the signal returns — no duplicate uploads, no lost records. |
+
+---
+
+## Frame Structure
+
+### LogicalFrame
+
+The `LogicalFrame` is the primary wire-format unit. It consists of a header and an encrypted payload.
+
+```typescript
+interface LogicalFrame {
+  header: FrameHeader;
+  payload: Uint8Array; // encrypted
+}
+```
+
+### FrameHeader
+
+The header carries all routing, ordering, and encryption metadata in cleartext.
+
+| Field | Type | Description |
+|---|---|---|
+| `protocolVersion` | `ProtocolVersion` | Protocol version (`{ major, minor }`). |
+| `frameType` | `FrameType` | One of `data`, `request`, `response`, `control`. |
+| `fragmentId` | `FragmentID` | UUID v4 uniquely identifying this fragment. |
+| `agreementId` | `AgreementID \| null` | Agreement this frame belongs to. `null` inherits from the previous frame. |
+| `originTimestamp` | `OriginTimestamp` | UTC millisecond timestamp of when the data was originally produced. |
+| `dagDependencies` | `DAGEdge[]` | List of DAG dependency edges to other fragments. |
+| `encryptionMetadata` | `EncryptionMetadata` | Algorithm identifier and key version (cleartext). |
+| `sequenceNumber` | `SequenceNumber` | Monotonically increasing integer for ordering and resume. |
+
+### FrameType
+
+```
+"data" | "request" | "response" | "control"
+```
+
+
+---
+
+## Fragment
+
+A `Fragment` is the fundamental data unit in DTP. Each fragment is bound to an Agreement and carries structured context metadata.
+
+```typescript
+interface Fragment {
+  fragmentId: FragmentID;           // UUID v4
+  agreementId: AgreementID;        // owning agreement
+  originTimestamp: OriginTimestamp; // when the data was produced (UTC ms)
+  contextMetadata: ContextMetadata; // structured context
+  dagDependencies: DAGEdge[];      // dependency graph edges
+  data: Uint8Array;                // actual data content
+}
+```
+
+### Primitive Identifiers
+
+| Type | Underlying | Description |
+|---|---|---|
+| `FragmentID` | `string` | UUID v4 — globally unique fragment identifier. |
+| `AgreementID` | `string` | UUID v4 — globally unique agreement identifier. |
+| `SessionID` | `string` | UUID v4 — globally unique session identifier. |
+| `OriginTimestamp` | `number` | UTC millisecond timestamp. |
+| `SequenceNumber` | `number` | Monotonically increasing integer (per direction, per session). |
+
+---
+
+## Context Metadata
+
+Every fragment carries structured context metadata to preserve the semantic meaning of the data across transfer.
+
+```typescript
+interface ContextMetadata {
+  dataType: string;
+  source: DataSource;
+  customFields: Record<string, unknown>;
+}
+```
+
+### DataSource (Discriminated Union)
+
+The `source` field is a discriminated union on the `kind` property:
+
+#### HardwareSource
+
+For data originating from hardware sensors. For example, a wrist-worn fitness tracker reporting acceleration data, or a home weather station reporting temperature and humidity.
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `"hardware"` | Discriminator. |
+| `sensorType` | `string` | Type of sensor (e.g. `"accelerometer"`, `"thermometer"`, `"heart_rate_monitor"`, `"gps"`). |
+| `precision` | `string` | Sensor precision descriptor (e.g. `"±0.1°C"`, `"±3 bpm"`). |
+| `samplingRate` | `number` | Sampling rate in Hz (e.g. `1` for once per second, `50` for an accelerometer). |
+
+#### SoftwareSource
+
+For data originating from software applications. For example, a food delivery app sharing the user's order history, or a browser extension reporting the current page URL.
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `"software"` | Discriminator. |
+| `appIdentifier` | `string` | Source application identifier (e.g. `"com.example.fooddelivery"`, `"org.browser.extension.readinglist"`). |
+| `sharingMethod` | `string` | Description of how the data is shared (e.g. `"api_push"`, `"clipboard_capture"`, `"screen_share"`). |
+
+---
+
+## DAG Dependencies
+
+Fragments can declare directed acyclic graph (DAG) dependencies on other fragments to express data lineage and relationships.
+
+```typescript
+interface DAGEdge {
+  targetFragmentId: FragmentID;
+  relationType: DAGRelationType;
+}
+```
+
+### DAGRelationType
+
+| Value | Meaning | Example |
+|---|---|---|
+| `derived_from` | This fragment is derived from the target fragment. | A "daily step summary" fragment is `derived_from` the individual step-count fragments recorded throughout the day. |
+| `annotates` | This fragment annotates/comments on the target fragment. | A weather data fragment (32°C, sunny) `annotates` a food order fragment (iced green bean soup), providing context that the user ordered cold food because of the heat. |
+| `supersedes` | This fragment supersedes (replaces) the target fragment. | The user updates their shipping address; the new address fragment `supersedes` the old one, so downstream consumers know to use the latest version. |
+
+---
+
+## Agreement
+
+An `Agreement` is a negotiated data transfer contract between Master and Slave. All data transmission must occur under an active agreement.
+
+```typescript
+interface Agreement {
+  agreementId: AgreementID;
+  sessionId: SessionID;
+  direction: TransferDirection;     // "collection" | "injection"
+  initiator: "master" | "slave";
+  params: AgreementParams;
+  status: AgreementStatus;
+  createdAt: number;                // UTC ms
+}
+```
+
+### AgreementParams
+
+| Field | Type | Description | Example |
+|---|---|---|---|
+| `dataType` | `string` | Data type or category. | `"heart_rate"`, `"location"`, `"purchase_history"` |
+| `dataRange` | `string` | Data range description. | `"last_24_hours"`, `"current_session"`, `"dietary_preferences_only"` |
+| `transferMode` | `TransferMode` | `"one_time"`, `"periodic"`, or `"streaming"`. | A shopping app requesting user preferences uses `one_time`; a fitness tracker sending heart rate uses `streaming`; a weather station reporting hourly uses `periodic`. |
+| `frequency` | `number \| null` | Transfer frequency in Hz (`null` for one-time mode). | `1` (once per second for heart rate), `0.000278` (once per hour for weather), `null` (one-time preference query). |
+| `validityPeriod` | `number` | Validity period in milliseconds. | `86400000` (24 hours for a daily fitness session), `3600000` (1 hour for a temporary shopping session). |
+| `priority` | `Priority` | `"low"`, `"normal"`, `"high"`, or `"critical"`. | `"critical"` for a medical alert device, `"normal"` for routine fitness data, `"low"` for background app analytics. |
+
+### AgreementStatus
+
+```
+"negotiating" | "active" | "suspended" | "terminated"
+```
+
+### TransferDirection
+
+```
+"collection" | "injection"
+```
+
+
+---
+
+## Agreement Negotiation
+
+### Negotiation Flow
+
+Agreement negotiation uses `RequestFrame` and `ResponseFrame` pairs:
+
+1. **Initiator** sends a `RequestFrame` with proposed parameters.
+2. **Responder** replies with a `ResponseFrame` containing one of three results:
+   - `accepted` — agreement is created with an `AgreementID`.
+   - `rejected` — request is denied (with a `rejectionReason`).
+   - `counter_proposal` — responder proposes alternative parameters.
+3. If a counter-proposal is made, the initiator may accept, reject, or counter again.
+
+### RequestFrame
+
+```typescript
+interface RequestFrame {
+  frameType: "request";
+  requestId: string;
+  requestorRole: "master" | "slave";
+  requestType: "collection" | "injection" | "adjustment" | "termination";
+  targetAgreementId?: AgreementID;  // for adjustment/termination
+  proposedParams: AgreementParams;
+}
+```
+
+| `requestType` | Description | Example |
+|---|---|---|
+| `collection` | Master requests data collection from Slave. | iFay asks a smart thermostat to start reporting room temperature every 5 minutes. |
+| `injection` | Slave requests data injection from Master. | A shopping app asks iFay for the user's clothing size preferences to improve recommendations. |
+| `adjustment` | Either party requests parameter adjustment of an existing agreement. | iFay notices the user is exercising and asks the heart rate monitor to increase reporting frequency from 1 Hz to 5 Hz. |
+| `termination` | Either party requests termination of an existing agreement. | The user leaves home, so iFay terminates the agreement with the home security camera's live feed. |
+
+### ResponseFrame
+
+```typescript
+interface ResponseFrame {
+  frameType: "response";
+  requestId: string;
+  result: NegotiationResult;        // "accepted" | "rejected" | "counter_proposal"
+  agreedParams?: AgreementParams;   // present on accepted / counter_proposal
+  agreementId?: AgreementID;        // present on accepted
+  rejectionReason?: string;         // present on rejected
+}
+```
+
+### Master–Slave Roles in Negotiation
+
+- **Data Collection** (Terminal → Fay): Master initiates. Slave may accept, reject (only for compliance reasons such as DLP policy), or propose alternatives. For example, iFay asks a corporate laptop to report browsing history; the laptop's DLP agent rejects the request because company policy forbids exporting browsing data off-device. iFay records this refusal.
+- **Data Injection** (Fay → Terminal): Slave initiates a request. Master has full decision authority — may accept (with filtered data range), reject, or propose alternatives. For example, a ride-hailing app asks iFay for the user's home and work addresses to suggest routes; iFay decides to share only the work address (since the user is commuting to work) and withholds the home address for privacy.
+
+---
+
+## Session
+
+A `Session` tracks the state of a DTP connection between a Master and a Slave, including bidirectional transfer state and active agreements.
+
+```typescript
+interface Session {
+  sessionId: SessionID;
+  masterIdentity: string;
+  slaveIdentity: string;
+  state: SessionState;
+  activeAgreements: Map<AgreementID, Agreement>;
+  collectionState: DirectionalTransferState;  // Terminal → Fay
+  injectionState: DirectionalTransferState;   // Fay → Terminal
+  createdAt: number;
+  lastActivityAt: number;
+  timeoutThreshold: number;  // ms
+}
+```
+
+### SessionState
+
+| State | Description | Example |
+|---|---|---|
+| `idle` | No active connection. | iFay is not connected to any terminal. |
+| `waiting_for_cap` | Waiting for CAP to complete identity verification and key exchange. | A smart speaker just powered on and is authenticating with iFay. |
+| `established` | CAP verified, session ready for negotiation. | iFay has authenticated with the user's phone; no data agreements yet. |
+| `negotiating` | Actively negotiating an agreement. | iFay is asking the phone's health app what data it can provide. |
+| `transmitting` | One or more agreements are active and data is flowing. | Heart rate data is streaming from the smartwatch to iFay. |
+| `suspended` | Connection lost, session state preserved for later resume. | The user entered a subway tunnel; the smartwatch lost BLE connection. |
+| `resuming` | Reconnecting and restoring session state. | The user exited the tunnel; the smartwatch is re-establishing the DTP session and reporting the last received sequence number. |
+
+### DirectionalTransferState
+
+Each direction maintains independent sequence numbers and an unacknowledged fragment cache for resume support.
+
+```typescript
+interface DirectionalTransferState {
+  currentSequenceNumber: SequenceNumber;
+  highestAcknowledgedSequenceNumber: SequenceNumber;
+  unacknowledgedFragmentCache: Map<SequenceNumber, Fragment>;
+}
+```
+
+---
+
+## Control Frames
+
+Control frames carry protocol-level signals such as agreement termination and error notifications.
+
+```typescript
+interface ControlFrame {
+  frameType: "control";
+  controlType: string;
+  agreementId?: AgreementID;
+  details?: Record<string, unknown>;
+}
+```
+
+---
+
+## Encryption
+
+DTP provides end-to-end encryption of payloads using keys pre-negotiated via CAP. The `EncryptionMetadata` is transmitted in cleartext within the frame header so receivers can identify the correct decryption parameters.
+
+```typescript
+interface EncryptionMetadata {
+  algorithm: string;   // e.g. "AES-256-GCM"
+  keyVersion: number;
+}
+```
+
+### CAPContext
+
+Provided by the CAP protocol upon successful authentication and key exchange:
+
+```typescript
+interface CAPContext {
+  identity: string;
+  sessionKey: Uint8Array;
+  verified: boolean;
+}
+```
+
+DTP will refuse to send data (`KEY_NOT_READY` error) if CAP verification has not completed. This ensures that even if a malicious terminal attempts to initiate data transfer before proper authentication, no data leaves the iFay boundary unencrypted.
+
+---
+
+## Transport
+
+DTP is transport-agnostic. The `Transport_Adapter` abstraction provides a uniform interface over BLE, WebSocket, TCP, RTSP, etc. This means the same DTP logic handles a fitness band connected via Bluetooth Low Energy, a home security camera streaming over RTSP, a cloud SaaS application communicating over WebSocket, and a vehicle's OBD-II dongle connected via TCP — all without any changes to the DTP core.
+
+```typescript
+interface TransportEndpoint {
+  protocol: string;
+  address: string;
+  port?: number;
+}
+
+interface Connection {
+  connectionId: ConnectionID;
+  state: ConnectionState;  // "connected" | "disconnected" | "error"
+}
+```
+
+---
+
+## Error Codes Reference
+
+DTP defines a structured error code space organized by category:
+
+### Frame Processing Errors (1xxx)
+
+| Code | Name | Description |
+|---|---|---|
+| 1001 | `FRAME_DESERIALIZATION_FAILED` | Received binary data could not be deserialized into a LogicalFrame. |
+| 1002 | `FRAME_INVALID_FORMAT` | Frame structure is invalid or missing required fields. |
+
+### Encryption Errors (2xxx)
+
+| Code | Name | Description |
+|---|---|---|
+| 2001 | `DECRYPTION_FAILED` | Payload decryption failed (wrong key or corrupted data). |
+| 2002 | `KEY_NOT_READY` | CAP key exchange has not completed; data transmission refused. For example, a terminal tries to push data immediately after connecting, before CAP authentication finishes. |
+
+### Agreement Errors (3xxx)
+
+| Code | Name | Description |
+|---|---|---|
+| 3001 | `AGREEMENT_NOT_FOUND` | Fragment references an unknown Agreement ID. For example, a terminal sends data referencing an agreement that was already terminated or never existed on the receiver side. |
+| 3002 | `AGREEMENT_EXPIRED` | The referenced agreement has expired. |
+| 3003 | `AGREEMENT_NEGOTIATION_FAILED` | Agreement negotiation could not be completed. |
+
+### DAG Errors (4xxx)
+
+| Code | Name | Description |
+|---|---|---|
+| 4001 | `DAG_CYCLE_DETECTED` | Adding this fragment would create a cycle in the DAG. For example, Fragment A declares `derived_from` Fragment B, and Fragment B declares `derived_from` Fragment A — this circular dependency is rejected. |
+| 4002 | `DAG_DEPENDENCY_UNRESOLVED` | Fragment declares a dependency on an unknown fragment (cached for later resolution). |
+
+### Session Errors (5xxx)
+
+| Code | Name | Description |
+|---|---|---|
+| 5001 | `SESSION_NOT_FOUND` | Referenced session does not exist. |
+| 5002 | `SESSION_TIMEOUT` | Session has timed out due to inactivity. |
+| 5003 | `SESSION_RESTORE_FAILED` | Session restoration after reconnection failed. |
+
+### Resume Errors (6xxx)
+
+| Code | Name | Description |
+|---|---|---|
+| 6001 | `BUFFER_FULL` | Sender's unacknowledged fragment cache has reached capacity. |
+| 6002 | `RETRANSMISSION_TIMEOUT` | Fragment retransmission timed out without acknowledgment. |
+
+### Version Errors (7xxx)
+
+| Code | Name | Description |
+|---|---|---|
+| 7001 | `VERSION_INCOMPATIBLE` | Received frame has a protocol version higher than supported. |
+
+### Permission Errors (8xxx)
+
+| Code | Name | Description |
+|---|---|---|
+| 8001 | `PERMISSION_DENIED` | Operation not permitted for the current role. |
+| 8002 | `OBSERVER_WRITE_DENIED` | Observer attempted a write operation (observers are read-only). For example, a family member's iFay is invited to observe the smart home camera feed but tries to adjust the camera's data collection agreement — this is denied because observers cannot modify agreements. |
+
+### ErrorNotificationFrame
+
+Error notifications are delivered as control frames:
+
+```typescript
+interface ErrorNotificationFrame {
+  frameType: "control";
+  controlType: "error_notification";
+  errorCode: DTPErrorCode;
+  errorMessage: string;
+  relatedFrameId?: FragmentID;
+  relatedAgreementId?: AgreementID;
+  details?: Record<string, unknown>;
+}
+```
+
+---
+
+## Helper Types
+
+### DAGValidationResult
+
+Returned when adding a fragment to the DAG:
+
+| Variant | Fields | Meaning |
+|---|---|---|
+| `accepted` | `{ status: "accepted" }` | Fragment accepted into the DAG. |
+| `pending` | `{ status: "pending", unresolvedDeps: FragmentID[] }` | Fragment cached; waiting for unresolved dependencies. |
+| `rejected` | `{ status: "rejected", reason: "cycle_detected" }` | Fragment rejected — would create a cycle. |
+
+### DependencyResolutionResult
+
+```typescript
+interface DependencyResolutionResult {
+  resolved: boolean;
+  resolvedDeps: FragmentID[];
+  unresolvedDeps: FragmentID[];
+}
+```
+
+### ResumeReport
+
+Reported by the receiver upon reconnection:
+
+```typescript
+interface ResumeReport {
+  collectionHighest: SequenceNumber;
+  injectionHighest: SequenceNumber;
+}
+```
+
+### AgreementRequest
+
+Used to initiate a negotiation:
+
+```typescript
+interface AgreementRequest {
+  direction: TransferDirection;
+  proposedParams: AgreementParams;
+}
+```
