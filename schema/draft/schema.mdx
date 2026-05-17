@@ -4,7 +4,7 @@
 
 The Data Tunnel Protocol (DTP) is an application-layer protocol within the iFay ecosystem responsible for bidirectional data transfer between terminals and Fay instances. DTP implements a **negotiation-based data tunnel** that supports two core data flows:
 
-- **Data Collection** (Terminal → Fay): Persists terminal-produced data into the iFay Personal Data Heap. For example, a smartwatch continuously sends heart rate readings to the user's iFay, which stores them as part of the host's health timeline.
+- **Data Collection** (Terminal → Fay): Persists terminal-produced data into the iFay Personal Data Heap. For example, a smartwatch continuously sends heart rate readings to the user's iFay, which stores them as part of the Human Prime's health timeline.
 - **Data Injection** (Fay → Terminal): Delivers filtered, minimized datasets from iFay to terminal applications. For example, a shopping app asks iFay for the user's dietary preferences; iFay responds with only "prefers cold beverages" without revealing the underlying health data or GPS history that led to that conclusion.
 
 DTP is transport-agnostic — it operates over BLE, WebSocket, TCP, RTSP, or any transport exposed through the `Transport_Adapter` abstraction. A smartwatch might use BLE, a home security camera might use RTSP, and a cloud-based SaaS app might use WebSocket — DTP treats them all the same. DTP works in tandem with the Control Authorization Protocol (CAP), which handles identity verification and key exchange before DTP takes over the data flow.
